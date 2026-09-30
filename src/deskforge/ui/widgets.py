@@ -1,292 +1,361 @@
-"""Reusable, Tk 9.0 & Pillow 12 safe UI widgets for DeskForge."""
+"""Reusable PySide6 (Qt 6) UI widgets, native SVG/theme icon cache, and async workers."""
 
 from __future__ import annotations
 
 from pathlib import Path
-import tkinter as tk
-from typing import Callable
+from typing import Any, Callable
+from urllib.parse import unquote, urlparse
 
-from PIL import Image, ImageDraw, ImageTk
-import ttkbootstrap as ttk
+from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from deskforge.domain.models import AppType
 from deskforge.infrastructure.icon_store import IconStore
 from deskforge.ui.theme import monogram_color_for_type
 
 
-def center_window(win: tk.Misc, width: int, height: int, parent: tk.Misc | None = None) -> None:
-    """Center a window safely on single or multi-monitor setups without external dependencies."""
-    win.update_idletasks()
-    if parent is not None:
-        try:
-            px = parent.winfo_rootx()
-            py = parent.winfo_rooty()
-            pw = parent.winfo_width()
-            ph = parent.winfo_height()
-            x = max(0, px + (pw - width) // 2)
-            y = max(0, py + (ph - height) // 2)
-            win.geometry(f"{width}x{height}+{x}+{y}")
-            return
-        except tk.TclError:
-            pass
-
-    sw = win.winfo_screenwidth()
-    sh = win.winfo_screenheight()
-    x = max(0, (sw - width) // 2)
-    y = max(0, (sh - height) // 2)
-    win.geometry(f"{width}x{height}+{x}+{y}")
+def extract_targets_from_urls(urls: list[QUrl]) -> list[str]:
+    """Convert dropped Qt QUrl objects into local filesystem paths or http(s) URLs."""
+    targets: list[str] = []
+    for url in urls:
+        if url.isLocalFile():
+            local = url.toLocalFile()
+            if local and Path(local).exists():
+                targets.append(local)
+        else:
+            raw = url.toString().strip()
+            if raw.startswith(("http://", "https://")):
+                targets.append(raw)
+    return targets
 
 
-class IconCache:
+def extract_target_from_text(raw: str) -> str | None:
+    """Parse pasted clipboard text (file:// URI, local path, or https:// URL)."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    if not first:
+        return None
+    if first.startswith("file://"):
+        decoded = unquote(urlparse(first).path)
+        return decoded if Path(decoded).exists() else None
+    if first.startswith(("http://", "https://")):
+        return first
+    expanded = Path(first).expanduser()
+    if expanded.is_file():
+        return str(expanded.resolve())
+    return None
+
+
+class IconProvider:
     """
-    Loads, resizes, and caches PhotoImage instances so Tk's garbage collector
-    never drops active widget images. Supports PNG/JPG/ICO/SVG and generates crisp
-    rounded monogram fallbacks when an icon cannot be loaded.
+    Loads and caches crisp QPixmaps for PNG, JPG, ICO, SVG, AND system icon theme names
+    (via QIcon.fromTheme), with anti-aliased rounded monogram fallbacks.
     """
 
     def __init__(self, icon_store: IconStore) -> None:
         self._icon_store = icon_store
-        self._cache: dict[tuple[str, int, str, str], ImageTk.PhotoImage] = {}
-
-    def get_icon(
-        self,
-        icon_path: str,
-        size: int = 48,
-        app_name: str = "A",
-        app_type: AppType = AppType.BINARY,
-    ) -> ImageTk.PhotoImage:
-        key = (icon_path or "", size, app_name[:1].upper() or "A", app_type.value)
-        if key in self._cache:
-            return self._cache[key]
-
-        pil_img = self._load_pil_image(icon_path, size)
-        if pil_img is None:
-            pil_img = self._make_monogram_icon(app_name, size, app_type)
-
-        photo = ImageTk.PhotoImage(pil_img)
-        self._cache[key] = photo
-        return photo
+        self._cache: dict[tuple[str, int, str, str], QPixmap] = {}
 
     def invalidate(self) -> None:
         self._cache.clear()
 
-    def _load_pil_image(self, icon_path: str, size: int) -> Image.Image | None:
-        if not icon_path:
-            return None
-        p = Path(icon_path).expanduser()
-        if not p.is_file():
+    def get_pixmap(
+        self,
+        icon_path: str,
+        size: int = 48,
+        app_name: str = "D",
+        app_type: AppType = AppType.BINARY,
+    ) -> QPixmap:
+        key = (icon_path or "", size, (app_name[:1] or "D").upper(), app_type.value)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+
+        pm = self._load_pixmap(icon_path, size)
+        if pm is None or pm.isNull():
+            pm = self._make_monogram_pixmap(app_name, size, app_type)
+
+        self._cache[key] = pm
+        return pm
+
+    def get_qicon(
+        self,
+        icon_path: str,
+        size: int = 48,
+        app_name: str = "D",
+        app_type: AppType = AppType.BINARY,
+    ) -> QIcon:
+        return QIcon(self.get_pixmap(icon_path, size=size, app_name=app_name, app_type=app_type))
+
+    def _load_pixmap(self, icon_path: str, size: int) -> QPixmap | None:
+        raw = (icon_path or "").strip()
+        if not raw:
             return None
 
-        target_file: Path | None = p
-        if p.suffix.lower() == ".svg":
-            target_file = self._icon_store.rasterize_svg(p, size=max(size * 2, 64))
-            if target_file is None:
-                return None
-
-        try:
-            with Image.open(target_file) as img:
-                rgba = img.convert("RGBA")
-                rgba.thumbnail((size, size), Image.Resampling.LANCZOS)
-                canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-                offset = ((size - rgba.width) // 2, (size - rgba.height) // 2)
-                canvas.paste(rgba, offset, rgba)
-                return canvas
-        except Exception:
+        # 1. System icon theme name (e.g. "steam", "utilities-terminal", "org.mozilla.firefox")
+        if "/" not in raw and "\\" not in raw and not Path(raw).exists():
+            theme_icon = QIcon.fromTheme(raw)
+            if not theme_icon.isNull():
+                pm = theme_icon.pixmap(QSize(size, size))
+                if not pm.isNull():
+                    return pm
             return None
+
+        path = Path(raw).expanduser()
+        if not path.is_file():
+            return None
+
+        # 2. Direct Qt load (natively supports PNG, JPG, WEBP, ICO, and SVG with QtSvg)
+        icon = QIcon(str(path))
+        if not icon.isNull():
+            pm = icon.pixmap(QSize(size, size))
+            if not pm.isNull():
+                return pm
+
+        # 3. Fallback SVG rasterizer via IconStore if QtSvg plugin is absent
+        if path.suffix.lower() == ".svg":
+            rasterized = self._icon_store.rasterize_svg(path, size=max(size * 2, 64))
+            if rasterized and rasterized.is_file():
+                pm = QPixmap(str(rasterized))
+                if not pm.isNull():
+                    return pm.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+
+        pm = QPixmap(str(path))
+        if not pm.isNull():
+            return pm.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        return None
 
     @staticmethod
-    def _make_monogram_icon(name: str, size: int, app_type: AppType) -> Image.Image:
-        s = size * 2
-        img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
+    def _make_monogram_pixmap(name: str, size: int, app_type: AppType) -> QPixmap:
+        pm = QPixmap(size, size)
+        pm.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(pm)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
         r, g, b = monogram_color_for_type(app_type)
-        draw.rounded_rectangle([4, 4, s - 4, s - 4], radius=s // 4, fill=(r, g, b, 255))
-        # Subtle inner ring for polish
-        draw.rounded_rectangle([10, 10, s - 10, s - 10], radius=s // 5, outline=(255, 255, 255, 70), width=3)
+        margin = 2
+        radius = size * 0.24
+        path = QPainterPath()
+        path.addRoundedRect(margin, margin, size - margin * 2, size - margin * 2, radius, radius)
+        painter.fillPath(path, QColor(r, g, b))
+
+        pen = QPen(QColor(255, 255, 255, 70))
+        pen.setWidthF(1.5)
+        painter.setPen(pen)
+        painter.drawPath(path)
+
         letter = (name.strip()[:1] or "D").upper()
-        bbox = draw.textbbox((0, 0), letter)
-        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        draw.text(((s - tw) / 2, (s - th) / 2 - 2), letter, fill=(255, 255, 255, 245))
-        return img.resize((size, size), Image.Resampling.LANCZOS)
+        font = QFont("Sans", max(10, int(size * 0.42)), QFont.Weight.Bold)
+        painter.setFont(font)
+        painter.setPen(QColor(255, 255, 255, 240))
+        painter.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, letter)
+        painter.end()
+        return pm
 
 
-class ToastManager:
-    """Displays clean, non-blocking toast notifications in the bottom-right corner."""
-
-    def __init__(self, root: tk.Misc) -> None:
-        self._root = root
-        self._active_frame: ttk.Frame | None = None
-        self._after_id: str | None = None
-
-    def show(self, message: str, bootstyle: str = "success", duration_ms: int = 3500) -> None:
-        self.dismiss()
-        frame = ttk.Frame(self._root, bootstyle=bootstyle, padding=(14, 10))
-        lbl = ttk.Label(
-            frame,
-            text=message,
-            bootstyle=f"{bootstyle}-inverse",
-            font=("Sans", 10, "bold"),
-            wraplength=360,
-        )
-        lbl.pack(side="left")
-
-        close_btn = ttk.Button(
-            frame,
-            text="✕",
-            bootstyle=f"{bootstyle}-link",
-            width=2,
-            command=self.dismiss,
-        )
-        close_btn.pack(side="left", padx=(10, 0))
-
-        frame.place(relx=0.98, rely=0.96, anchor="se")
-        frame.lift()
-        self._active_frame = frame
-        self._after_id = self._root.after(duration_ms, self.dismiss)
-
-    def dismiss(self) -> None:
-        if self._after_id is not None:
-            try:
-                self._root.after_cancel(self._after_id)
-            except tk.TclError:
-                pass
-            self._after_id = None
-        if self._active_frame is not None:
-            try:
-                self._active_frame.destroy()
-            except tk.TclError:
-                pass
-            self._active_frame = None
+class _WorkerSignals(QObject):
+    finished = Signal(object)
+    error = Signal(Exception)
 
 
-class ScrollableFrame(ttk.Frame):
-    """Smooth vertical scrolling container with Linux X11/Wayland wheel support."""
+class _BackgroundRunnable(QRunnable):
+    def __init__(self, fn: Callable[[], Any]) -> None:
+        super().__init__()
+        self._fn = fn
+        self.signals = _WorkerSignals()
 
-    def __init__(self, master: tk.Misc, **kwargs) -> None:
-        super().__init__(master, **kwargs)
-        self.canvas = tk.Canvas(self, highlightthickness=0, bd=0)
-        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        self.inner = ttk.Frame(self.canvas)
-
-        self._window_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
-        self.canvas.configure(yscrollcommand=self.scrollbar.set)
-
-        self.canvas.pack(side="left", fill="both", expand=True)
-        self.scrollbar.pack(side="right", fill="y")
-
-        self.inner.bind("<Configure>", self._on_inner_configure)
-        self.canvas.bind("<Configure>", self._on_canvas_configure)
-        self.bind("<Enter>", self._bind_wheel)
-        self.bind("<Leave>", self._unbind_wheel)
-        self.sync_canvas_bg()
-
-    def sync_canvas_bg(self) -> None:
-        """Keep the underlying tk.Canvas background matched to the current ttkbootstrap theme."""
+    def run(self) -> None:
         try:
-            style = ttk.Style()
-            bg = style.colors.bg
-            self.canvas.configure(bg=bg)
-        except Exception:
+            res = self._fn()
+        except Exception as exc:
+            self.signals.error.emit(exc)
+            return
+        self.signals.finished.emit(res)
+
+
+def run_async(
+    parent: QObject,
+    fn: Callable[[], Any],
+    on_done: Callable[[Any], None],
+    on_error: Callable[[Exception], None] | None = None,
+) -> None:
+    """Run blocking IO/inspection on Qt's global thread pool and deliver results safely on the UI thread."""
+    runnable = _BackgroundRunnable(fn)
+    runnable.signals.finished.connect(on_done)
+    if on_error is not None:
+        runnable.signals.error.connect(on_error)
+    # Attach reference to parent until completion to prevent premature GC of signals
+    active_list = getattr(parent, "_active_workers", None)
+    if active_list is None:
+        active_list = []
+        setattr(parent, "_active_workers", active_list)
+    active_list.append(runnable)
+
+    def _cleanup(*_args: Any) -> None:
+        try:
+            active_list.remove(runnable)
+        except ValueError:
             pass
 
-    def _on_inner_configure(self, _event=None) -> None:
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-
-    def _on_canvas_configure(self, event) -> None:
-        self.canvas.itemconfigure(self._window_id, width=event.width)
-
-    def _on_mousewheel(self, event) -> None:
-        if getattr(event, "num", None) == 4:
-            self.canvas.yview_scroll(-3, "units")
-        elif getattr(event, "num", None) == 5:
-            self.canvas.yview_scroll(3, "units")
-        elif getattr(event, "delta", 0):
-            step = -1 if event.delta > 0 else 1
-            self.canvas.yview_scroll(step * 3, "units")
-
-    def _bind_wheel(self, _event=None) -> None:
-        self.canvas.bind_all("<Button-4>", self._on_mousewheel)
-        self.canvas.bind_all("<Button-5>", self._on_mousewheel)
-        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-
-    def _unbind_wheel(self, _event=None) -> None:
-        self.canvas.unbind_all("<Button-4>")
-        self.canvas.unbind_all("<Button-5>")
-        self.canvas.unbind_all("<MouseWheel>")
+    runnable.signals.finished.connect(_cleanup)
+    runnable.signals.error.connect(_cleanup)
+    QThreadPool.globalInstance().start(runnable)
 
 
-class ConfirmDialog(ttk.Toplevel):
+class ToastBanner(QFrame):
+    """Non-blocking floating corner notification banner."""
+
+    _STYLES = {
+        "success": ("#168a57", "#ffffff"),
+        "info": ("#0d7490", "#ffffff"),
+        "warning": ("#b45309", "#ffffff"),
+        "danger": ("#c82333", "#ffffff"),
+    }
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setObjectName("ToastBanner")
+        self.hide()
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 10, 10, 10)
+        layout.setSpacing(10)
+
+        self._label = QLabel("")
+        self._label.setWordWrap(True)
+        self._label.setMaximumWidth(380)
+        layout.addWidget(self._label)
+
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(24, 24)
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.setStyleSheet(
+            "QPushButton { background: transparent; border: none; color: #ffffff; font-weight: bold; padding: 0; }"
+            "QPushButton:hover { background: rgba(255,255,255,0.2); border-radius: 12px; }"
+        )
+        close_btn.clicked.connect(self.hide)
+        layout.addWidget(close_btn)
+
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.hide)
+
+    def show_message(self, message: str, kind: str = "success", duration_ms: int = 3500) -> None:
+        bg, fg = self._STYLES.get(kind, self._STYLES["info"])
+        self.setStyleSheet(f"QFrame#ToastBanner {{ background-color: {bg}; border-radius: 10px; }}")
+        self._label.setStyleSheet(f"color: {fg}; font-weight: 600; background: transparent;")
+        self._label.setText(message)
+        self.adjustSize()
+        self.reposition()
+        self.show()
+        self.raise_()
+        self._timer.start(duration_ms)
+
+    def reposition(self) -> None:
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        self.adjustSize()
+        margin_x = 18
+        margin_y = 44
+        x = max(12, parent.width() - self.width() - margin_x)
+        y = max(12, parent.height() - self.height() - margin_y)
+        self.move(x, y)
+
+
+class DropOverlay(QFrame):
+    """Visual overlay shown when dragging files or URLs over the DeskForge window."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setObjectName("DropOverlay")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.hide()
+
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setSpacing(8)
+
+        title = QLabel("⬇  Soltá el archivo o URL aquí")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("color: #ffffff; font-size: 20px; font-weight: 700; background: transparent;")
+        subtitle = QLabel("AppImage · .jar (Java) · Binario ELF · Script · URL de WebApp")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        subtitle.setStyleSheet("color: #9cebe3; font-size: 13px; background: transparent;")
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+    def sync_geometry(self) -> None:
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        margin = 18
+        self.setGeometry(margin, margin, max(100, parent.width() - margin * 2), max(100, parent.height() - margin * 2))
+
+
+class ConfirmActionDialog(QDialog):
     """Clean modal confirmation dialog with an optional checkbox."""
 
     def __init__(
         self,
-        parent: tk.Misc,
+        parent: QWidget,
         title: str,
         message: str,
         confirm_text: str = "Confirmar",
-        confirm_style: str = "danger",
+        confirm_variant: str = "danger-solid",
         checkbox_text: str | None = None,
         checkbox_default: bool = False,
     ) -> None:
         super().__init__(parent)
-        self.title(title)
-        self.resizable(False, False)
-        self.confirmed = False
-        self.checkbox_var = tk.BooleanVar(value=checkbox_default)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(440)
+        self.setModal(True)
+        self._checkbox: QCheckBox | None = None
 
-        container = ttk.Frame(self, padding=20)
-        container.pack(fill="both", expand=True)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
 
-        ttk.Label(container, text=title, font=("Sans", 13, "bold")).pack(anchor="w")
-        ttk.Label(container, text=message, wraplength=420, justify="left").pack(anchor="w", pady=(8, 12))
+        hdr = QLabel(title)
+        hdr.setStyleSheet("font-size: 15px; font-weight: 700;")
+        layout.addWidget(hdr)
+
+        body = QLabel(message)
+        body.setWordWrap(True)
+        body.setProperty("muted", True)
+        layout.addWidget(body)
 
         if checkbox_text:
-            ttk.Checkbutton(
-                container,
-                text=checkbox_text,
-                variable=self.checkbox_var,
-                bootstyle="round-toggle",
-            ).pack(anchor="w", pady=(0, 14))
+            self._checkbox = QCheckBox(checkbox_text)
+            self._checkbox.setChecked(checkbox_default)
+            layout.addWidget(self._checkbox)
 
-        btn_row = ttk.Frame(container)
-        btn_row.pack(fill="x", pady=(6, 0))
-        ttk.Button(btn_row, text="Cancelar", bootstyle="secondary-outline", command=self._cancel).pack(side="right")
-        ttk.Button(btn_row, text=confirm_text, bootstyle=confirm_style, command=self._ok).pack(side="right", padx=(0, 8))
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        cancel_btn = QPushButton("Cancelar")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
 
-        self.bind("<Escape>", lambda _e: self._cancel())
-        self.bind("<Return>", lambda _e: self._ok())
+        confirm_btn = QPushButton(confirm_text)
+        confirm_btn.setProperty("variant", confirm_variant)
+        confirm_btn.setDefault(True)
+        confirm_btn.clicked.connect(self.accept)
+        btn_row.addWidget(confirm_btn)
+        layout.addLayout(btn_row)
 
-        self.transient(parent)
-        self.update_idletasks()
-        center_window(self, max(440, self.winfo_reqwidth()), max(175, self.winfo_reqheight()), parent)
-        self.grab_set()
-        self.wait_window(self)
-
-    def _ok(self) -> None:
-        self.confirmed = True
-        self.destroy()
-
-    def _cancel(self) -> None:
-        self.confirmed = False
-        self.destroy()
-
-
-def run_in_background(
-    widget: tk.Misc,
-    worker: Callable[[], object],
-    on_done: Callable[[object], None],
-    on_error: Callable[[Exception], None] | None = None,
-) -> None:
-    """Execute blocking inspection/IO in a daemon thread and safely marshal results back to Tk."""
-    import threading
-
-    def _target() -> None:
-        try:
-            result = worker()
-        except Exception as exc:
-            if on_error:
-                widget.after(0, lambda e=exc: on_error(e))
-            return
-        widget.after(0, lambda r=result: on_done(r))
-
-    threading.Thread(target=_target, daemon=True).start()
+    @property
+    def checkbox_checked(self) -> bool:
+        return self._checkbox.isChecked() if self._checkbox is not None else False
