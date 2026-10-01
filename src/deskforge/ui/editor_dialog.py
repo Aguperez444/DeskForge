@@ -1,13 +1,37 @@
-"""3-tab Integrate / Edit modal dialog with async metadata extraction, JVM/Env controls, and .desktop preview."""
+"""3-tab Integrate / Edit QDialog (PySide6) with async inspection, JVM/Env controls, and .desktop preview."""
 
 from __future__ import annotations
 
 import shlex
-import tkinter as tk
-from tkinter import filedialog
 from typing import Callable
 
-import ttkbootstrap as ttk
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QButtonGroup,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QFileDialog,
+    QFormLayout,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QPlainTextEdit,
+    QProgressBar,
+    QPushButton,
+    QRadioButton,
+    QScrollArea,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from deskforge.application import ServiceContainer
 from deskforge.domain.categories import CATEGORIES
@@ -15,17 +39,17 @@ from deskforge.domain.exceptions import DeskForgeError
 from deskforge.domain.models import AppType, DetectionResult, JavaOptions, ManagedApp, StorageMode
 from deskforge.infrastructure.inspectors.java_runtime import detect_java_runtimes
 from deskforge.infrastructure.inspectors.webapp_inspector import detect_installed_browsers
-from deskforge.ui.widgets import IconCache, ScrollableFrame, center_window, run_in_background
+from deskforge.ui.widgets import IconProvider, run_async
 
 
-class AppEditorDialog(ttk.Toplevel):
-    """Modal dialog for integrating a new app or editing an existing ManagedApp."""
+class AppEditorDialog(QDialog):
+    """Modal 3-tab dialog for integrating a new application or editing an existing ManagedApp."""
 
     def __init__(
         self,
-        parent: tk.Misc,
+        parent: QWidget,
         services: ServiceContainer,
-        icon_cache: IconCache,
+        icon_provider: IconProvider,
         on_saved: Callable[[ManagedApp, bool], None],
         existing_app: ManagedApp | None = None,
         initial_target: str = "",
@@ -33,629 +57,705 @@ class AppEditorDialog(ttk.Toplevel):
     ) -> None:
         super().__init__(parent)
         self._services = services
-        self._icon_cache = icon_cache
+        self._icon_provider = icon_provider
         self._on_saved = on_saved
         self._existing = existing_app
         self._is_edit = existing_app is not None
         self._icon_candidates: list[str] = []
         self._env_vars: dict[str, str] = dict(existing_app.env_vars) if existing_app else {}
-        self._cat_vars: dict[str, tk.BooleanVar] = {}
+        self._cat_checks: dict[str, QCheckBox] = {}
+        self._type_buttons: dict[AppType, QPushButton] = {}
+        self._storage_radios: dict[StorageMode, QRadioButton] = {}
         self._java_runtimes = detect_java_runtimes()
         self._browsers = detect_installed_browsers()
+        self._cfg = services.app_service.get_config()
 
-        cfg = services.app_service.get_config()
-
-        # Tk Variables
-        self.var_target = tk.StringVar(value=existing_app.exec_target if existing_app else initial_target)
-        self.var_name = tk.StringVar(value=existing_app.name if existing_app else "")
-        self.var_comment = tk.StringVar(value=existing_app.comment if existing_app else "")
-        self.var_version = tk.StringVar(value=existing_app.version if existing_app else "")
-        default_type = (
-            existing_app.app_type.value
+        self._current_type = (
+            existing_app.app_type
             if existing_app
-            else (AppType.WEBAPP.value if initial_mode_webapp else AppType.APPIMAGE.value)
-        )
-        self.var_type = tk.StringVar(value=default_type)
-        self.var_icon = tk.StringVar(value=existing_app.icon_path if existing_app else "")
-        self.var_storage = tk.StringVar(
-            value=existing_app.storage_mode.value if existing_app else cfg.default_storage_mode
-        )
-        self.var_desktop_shortcut = tk.BooleanVar(
-            value=existing_app.create_desktop_shortcut if existing_app else cfg.default_desktop_shortcut
+            else (AppType.WEBAPP if initial_mode_webapp else AppType.APPIMAGE)
         )
 
-        # Advanced vars
-        self.var_java_path = tk.StringVar(value=existing_app.java_options.java_path if existing_app else "java")
-        self.var_xmx = tk.StringVar(value=existing_app.java_options.max_memory if existing_app else "")
-        self.var_xms = tk.StringVar(value=existing_app.java_options.min_memory if existing_app else "")
-        self.var_jvm_args = tk.StringVar(
-            value=" ".join(existing_app.java_options.jvm_args) if existing_app else ""
-        )
-        self.var_browser = tk.StringVar(
-            value=(
-                existing_app.webapp_browser
-                if existing_app and existing_app.webapp_browser
-                else (self._browsers[0][0] if self._browsers else "chromium")
-            )
-        )
-        self.var_interpreter = tk.StringVar(value=existing_app.script_interpreter if existing_app else "")
-        self.var_args = tk.StringVar(value=" ".join(existing_app.args) if existing_app else "")
-        self.var_workdir = tk.StringVar(value=existing_app.working_dir if existing_app else "")
-        self.var_wm_class = tk.StringVar(value=existing_app.startup_wm_class if existing_app else "")
-        self.var_keywords = tk.StringVar(value="; ".join(existing_app.keywords) if existing_app else "")
-        self.var_terminal = tk.BooleanVar(value=existing_app.terminal if existing_app else False)
-        self.var_gpu = tk.BooleanVar(value=existing_app.dedicated_gpu if existing_app else False)
-        self.var_nodisplay = tk.BooleanVar(value=existing_app.no_display if existing_app else False)
+        self.setWindowTitle(f"Editar — {existing_app.name}" if existing_app else "Integrar nueva aplicación")
+        self.resize(840, 690)
+        self.setMinimumSize(760, 600)
+        self.setModal(True)
 
-        self.title(f"Editar — {existing_app.name}" if existing_app else "Integrar nueva aplicación")
-        self.minsize(760, 620)
-        self._build_ui()
+        self._build_ui(initial_target)
+        self._populate_initial_values(initial_target)
         self._sync_conditional_sections()
-
-        self.var_type.trace_add("write", lambda *_: self._sync_conditional_sections())
-        self.var_icon.trace_add("write", lambda *_: self._refresh_icon_preview())
-        self.var_name.trace_add("write", lambda *_: self._refresh_icon_preview())
-
-        self.bind("<Escape>", lambda _e: self.destroy())
-        self.transient(parent)
-        center_window(self, 820, 680, parent)
-        self.grab_set()
+        self._refresh_icon_preview()
 
         if initial_target and not existing_app:
             self._run_inspection(initial_target)
 
     # ----------------------------------------------------------------- UI Build
 
-    def _build_ui(self) -> None:
-        root_frame = ttk.Frame(self, padding=14)
-        root_frame.pack(fill="both", expand=True)
+    def _build_ui(self, initial_target: str) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(10)
 
-        # Header + progress bar for async inspection
-        header = ttk.Frame(root_frame)
-        header.pack(fill="x", pady=(0, 8))
-        title_text = f"Editar aplicación: {self._existing.name}" if self._existing else "Integrar aplicación en tu escritorio"
-        ttk.Label(header, text=title_text, font=("Sans", 13, "bold")).pack(side="left")
+        # Header + async progress indicator
+        header = QHBoxLayout()
+        title_txt = f"Editar aplicación: {self._existing.name}" if self._existing else "Integrar aplicación en tu escritorio"
+        title_lbl = QLabel(title_txt)
+        title_lbl.setStyleSheet("font-size: 16px; font-weight: 700;")
+        header.addWidget(title_lbl)
+        header.addStretch(1)
 
-        self._status_lbl = ttk.Label(header, text="", bootstyle="info")
-        self._status_lbl.pack(side="right", padx=(8, 0))
-        self._progress = ttk.Progressbar(header, mode="indeterminate", length=120, bootstyle="info-striped")
+        self._status_lbl = QLabel("")
+        self._status_lbl.setStyleSheet("color: #2ec4b6; font-weight: 600;")
+        header.addWidget(self._status_lbl)
 
-        # Warning banner (hidden unless inspector reports warnings)
-        self._warning_lbl = ttk.Label(root_frame, text="", bootstyle="warning", wraplength=760, justify="left")
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 0)
+        self._progress.setFixedWidth(130)
+        self._progress.hide()
+        header.addWidget(self._progress)
+        root.addLayout(header)
 
-        # Tabs
-        self._notebook = ttk.Notebook(root_frame)
-        self._notebook.pack(fill="both", expand=True, pady=(4, 10))
-        self._notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
-
-        tab_general = ttk.Frame(self._notebook, padding=12)
-        tab_advanced = ttk.Frame(self._notebook, padding=12)
-        tab_preview = ttk.Frame(self._notebook, padding=12)
-
-        self._notebook.add(tab_general, text="  General  ")
-        self._notebook.add(tab_advanced, text="  Avanzado (JVM / Env / GPU)  ")
-        self._notebook.add(tab_preview, text="  Vista previa .desktop  ")
-
-        self._build_general_tab(tab_general)
-        self._build_advanced_tab(tab_advanced)
-        self._build_preview_tab(tab_preview)
-
-        # Footer action bar
-        footer = ttk.Frame(root_frame)
-        footer.pack(fill="x")
-        self._error_lbl = ttk.Label(footer, text="", bootstyle="danger")
-        self._error_lbl.pack(side="left", fill="x", expand=True)
-
-        ttk.Button(footer, text="Cancelar", bootstyle="secondary-outline", command=self.destroy).pack(side="right")
-        save_label = "💾 Guardar cambios" if self._is_edit else "✓ Integrar aplicación"
-        self._save_btn = ttk.Button(footer, text=save_label, bootstyle="success", command=self._on_submit)
-        self._save_btn.pack(side="right", padx=(0, 8))
-
-    def _build_general_tab(self, parent: ttk.Frame) -> None:
-        scroll = ScrollableFrame(parent)
-        scroll.pack(fill="both", expand=True)
-        body = scroll.inner
-        body.columnconfigure(1, weight=1)
-
-        # Row 0: Target file / URL
-        ttk.Label(body, text="Archivo o URL:", font=("Sans", 10, "bold")).grid(row=0, column=0, sticky="w", pady=5)
-        target_row = ttk.Frame(body)
-        target_row.grid(row=0, column=1, sticky="ew", pady=5)
-        target_row.columnconfigure(0, weight=1)
-        ttk.Entry(target_row, textvariable=self.var_target).grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ttk.Button(target_row, text="Examinar...", bootstyle="secondary-outline", command=self._browse_target).grid(
-            row=0, column=1, padx=(0, 6)
+        # Warning banner
+        self._warning_lbl = QLabel("")
+        self._warning_lbl.setWordWrap(True)
+        self._warning_lbl.setStyleSheet(
+            "background-color: rgba(217, 119, 6, 0.18); border: 1px solid #d97706; "
+            "border-radius: 8px; padding: 8px 10px; color: #f59e0b; font-weight: 600;"
         )
-        ttk.Button(target_row, text="✨ Detectar", bootstyle="info-outline", command=self._trigger_inspect).grid(
-            row=0, column=2
-        )
+        self._warning_lbl.hide()
+        root.addWidget(self._warning_lbl)
 
-        # Row 1: App Type + Version
-        ttk.Label(body, text="Tipo de app:", font=("Sans", 10, "bold")).grid(row=1, column=0, sticky="w", pady=5)
-        type_row = ttk.Frame(body)
-        type_row.grid(row=1, column=1, sticky="ew", pady=5)
+        # Notebook tabs
+        self._tabs = QTabWidget()
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+
+        self._tabs.addTab(self._build_general_tab(), "  General  ")
+        self._tabs.addTab(self._build_advanced_tab(), "  Avanzado (JVM / Env / GPU)  ")
+        self._tabs.addTab(self._build_preview_tab(), "  Vista previa .desktop  ")
+        root.addWidget(self._tabs, stretch=1)
+
+        # Footer
+        footer = QHBoxLayout()
+        self._error_lbl = QLabel("")
+        self._error_lbl.setStyleSheet("color: #ef4444; font-weight: 600;")
+        self._error_lbl.setWordWrap(True)
+        footer.addWidget(self._error_lbl, stretch=1)
+
+        cancel_btn = QPushButton("Cancelar")
+        cancel_btn.clicked.connect(self.reject)
+        footer.addWidget(cancel_btn)
+
+        save_txt = "💾 Guardar cambios" if self._is_edit else "✓ Integrar aplicación"
+        self._save_btn = QPushButton(save_txt)
+        self._save_btn.setProperty("variant", "success")
+        self._save_btn.setDefault(True)
+        self._save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._save_btn.clicked.connect(self._on_submit)
+        footer.addWidget(self._save_btn)
+        root.addLayout(footer)
+
+    def _build_general_tab(self) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        host = QWidget()
+        form = QFormLayout(host)
+        form.setContentsMargins(14, 14, 14, 14)
+        form.setSpacing(10)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        # Target row
+        target_box = QHBoxLayout()
+        target_box.setSpacing(6)
+        self._target_edit = QLineEdit()
+        self._target_edit.setPlaceholderText("/ruta/al/archivo.AppImage, .jar, binario o https://...")
+        target_box.addWidget(self._target_edit, stretch=1)
+
+        browse_btn = QPushButton("Examinar...")
+        browse_btn.clicked.connect(self._browse_target)
+        target_box.addWidget(browse_btn)
+
+        detect_btn = QPushButton("✨ Detectar")
+        detect_btn.setProperty("variant", "primary")
+        detect_btn.clicked.connect(self._trigger_inspect)
+        target_box.addWidget(detect_btn)
+        form.addRow("Archivo o URL:", target_box)
+
+        # AppType selector pills
+        type_row = QHBoxLayout()
+        type_row.setSpacing(6)
+        self._type_group = QButtonGroup(self)
+        self._type_group.setExclusive(True)
         for app_type in AppType:
-            ttk.Radiobutton(
-                type_row,
-                text=app_type.label,
-                variable=self.var_type,
-                value=app_type.value,
-                bootstyle="info-toolbutton",
-            ).pack(side="left", padx=(0, 5))
+            btn = QPushButton(app_type.label)
+            btn.setCheckable(True)
+            btn.setProperty("pill", True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _c=False, t=app_type: self._set_app_type(t))
+            self._type_group.addButton(btn)
+            type_row.addWidget(btn)
+            self._type_buttons[app_type] = btn
+        type_row.addStretch(1)
+        form.addRow("Tipo de app:", type_row)
 
-        # Row 2: Name + Version
-        ttk.Label(body, text="Nombre:", font=("Sans", 10, "bold")).grid(row=2, column=0, sticky="w", pady=5)
-        name_row = ttk.Frame(body)
-        name_row.grid(row=2, column=1, sticky="ew", pady=5)
-        name_row.columnconfigure(0, weight=3)
-        name_row.columnconfigure(2, weight=1)
-        ttk.Entry(name_row, textvariable=self.var_name).grid(row=0, column=0, sticky="ew")
-        ttk.Label(name_row, text="Versión:").grid(row=0, column=1, padx=(12, 6))
-        ttk.Entry(name_row, textvariable=self.var_version, width=14).grid(row=0, column=2, sticky="ew")
+        # Name + Version
+        nv_row = QHBoxLayout()
+        nv_row.setSpacing(8)
+        self._name_edit = QLineEdit()
+        self._name_edit.setPlaceholderText("Nombre visible en el menú de aplicaciones")
+        self._name_edit.textChanged.connect(self._refresh_icon_preview)
+        nv_row.addWidget(self._name_edit, stretch=3)
 
-        # Row 3: Comment
-        ttk.Label(body, text="Descripción:", font=("Sans", 10, "bold")).grid(row=3, column=0, sticky="w", pady=5)
-        ttk.Entry(body, textvariable=self.var_comment).grid(row=3, column=1, sticky="ew", pady=5)
+        nv_row.addWidget(QLabel("Versión:"))
+        self._version_edit = QLineEdit()
+        self._version_edit.setPlaceholderText("ej. 1.0.0")
+        self._version_edit.setMaximumWidth(130)
+        nv_row.addWidget(self._version_edit, stretch=1)
+        form.addRow("Nombre:", nv_row)
 
-        # Row 4: Icon section with live preview + candidate gallery
-        ttk.Label(body, text="Ícono:", font=("Sans", 10, "bold")).grid(row=4, column=0, sticky="nw", pady=8)
-        icon_box = ttk.Frame(body)
-        icon_box.grid(row=4, column=1, sticky="ew", pady=5)
-        icon_box.columnconfigure(1, weight=1)
+        # Comment
+        self._comment_edit = QLineEdit()
+        self._comment_edit.setPlaceholderText("Descripción breve de la aplicación")
+        form.addRow("Descripción:", self._comment_edit)
 
-        self._icon_preview_lbl = ttk.Label(icon_box)
-        self._icon_preview_lbl.grid(row=0, column=0, rowspan=2, padx=(0, 12), sticky="n")
+        # Icon preview + path + extracted gallery
+        icon_container = QWidget()
+        icon_grid = QHBoxLayout(icon_container)
+        icon_grid.setContentsMargins(0, 0, 0, 0)
+        icon_grid.setSpacing(12)
 
-        icon_input_row = ttk.Frame(icon_box)
-        icon_input_row.grid(row=0, column=1, sticky="ew")
-        icon_input_row.columnconfigure(0, weight=1)
-        ttk.Entry(icon_input_row, textvariable=self.var_icon).grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ttk.Button(icon_input_row, text="Elegir...", bootstyle="secondary-outline", command=self._browse_icon).grid(
-            row=0, column=1, padx=(0, 4)
-        )
-        ttk.Button(
-            icon_input_row,
-            text="Default",
-            bootstyle="secondary-link",
-            command=lambda: self.var_icon.set(""),
-        ).grid(row=0, column=2)
+        self._icon_preview = QLabel()
+        self._icon_preview.setFixedSize(64, 64)
+        self._icon_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_grid.addWidget(self._icon_preview, alignment=Qt.AlignmentFlag.AlignTop)
 
-        self._icon_gallery = ttk.Frame(icon_box)
-        self._icon_gallery.grid(row=1, column=1, sticky="w", pady=(6, 0))
-        self._refresh_icon_preview()
+        icon_right = QVBoxLayout()
+        icon_right.setSpacing(6)
+        icon_input_row = QHBoxLayout()
+        icon_input_row.setSpacing(6)
+        self._icon_edit = QLineEdit()
+        self._icon_edit.setPlaceholderText("Ruta a PNG/SVG/ICO o nombre de ícono del sistema")
+        self._icon_edit.textChanged.connect(self._refresh_icon_preview)
+        icon_input_row.addWidget(self._icon_edit, stretch=1)
 
-        # Row 5: Categories grid (multi-select)
-        ttk.Label(body, text="Categorías:", font=("Sans", 10, "bold")).grid(row=5, column=0, sticky="nw", pady=8)
-        cat_frame = ttk.Frame(body)
-        cat_frame.grid(row=5, column=1, sticky="ew", pady=5)
-        selected_cats = set(self._existing.categories if self._existing else ["Utility"])
+        pick_icon_btn = QPushButton("Elegir...")
+        pick_icon_btn.clicked.connect(self._browse_icon)
+        icon_input_row.addWidget(pick_icon_btn)
+
+        default_icon_btn = QPushButton("Default")
+        default_icon_btn.setProperty("variant", "ghost")
+        default_icon_btn.clicked.connect(lambda: self._icon_edit.setText(""))
+        icon_input_row.addWidget(default_icon_btn)
+        icon_right.addLayout(icon_input_row)
+
+        self._gallery_host = QWidget()
+        self._gallery_layout = QHBoxLayout(self._gallery_host)
+        self._gallery_layout.setContentsMargins(0, 0, 0, 0)
+        self._gallery_layout.setSpacing(6)
+        self._gallery_host.hide()
+        icon_right.addWidget(self._gallery_host)
+
+        icon_grid.addLayout(icon_right, stretch=1)
+        form.addRow("Ícono:", icon_container)
+
+        # Categories multi-select grid
+        cat_host = QWidget()
+        cat_grid = QGridLayout(cat_host)
+        cat_grid.setContentsMargins(0, 2, 0, 2)
+        cat_grid.setHorizontalSpacing(14)
+        cat_grid.setVerticalSpacing(5)
         for idx, cat in enumerate(CATEGORIES):
-            var = tk.BooleanVar(value=cat.code in selected_cats)
-            self._cat_vars[cat.code] = var
-            cb = ttk.Checkbutton(cat_frame, text=cat.label_es, variable=var, bootstyle="round-toggle")
-            cb.grid(row=idx // 4, column=idx % 4, sticky="w", padx=(0, 12), pady=2)
+            cb = QCheckBox(cat.label_es)
+            cb.setToolTip(f"{cat.code}: {cat.description_es}")
+            self._cat_checks[cat.code] = cb
+            cat_grid.addWidget(cb, idx // 4, idx % 4)
+        form.addRow("Categorías:", cat_host)
 
-        # Row 6: Storage mode (only when integrating new local file)
-        self._storage_label = ttk.Label(body, text="Almacenamiento:", font=("Sans", 10, "bold"))
-        self._storage_frame = ttk.Frame(body)
+        # Storage mode (shown only when integrating new non-WebApp)
+        self._storage_label = QLabel("Almacenamiento:")
+        self._storage_widget = QWidget()
+        st_layout = QVBoxLayout(self._storage_widget)
+        st_layout.setContentsMargins(0, 0, 0, 0)
+        st_layout.setSpacing(4)
+        self._storage_group = QButtonGroup(self)
         for mode in StorageMode:
-            ttk.Radiobutton(
-                self._storage_frame,
-                text=mode.label_es,
-                variable=self.var_storage,
-                value=mode.value,
-            ).pack(anchor="w", pady=1)
-
+            rb = QRadioButton(mode.label_es)
+            self._storage_group.addButton(rb)
+            self._storage_radios[mode] = rb
+            st_layout.addWidget(rb)
         if not self._is_edit:
-            self._storage_label.grid(row=6, column=0, sticky="nw", pady=8)
-            self._storage_frame.grid(row=6, column=1, sticky="w", pady=5)
+            form.addRow(self._storage_label, self._storage_widget)
 
-        # Row 7: Desktop shortcut toggle
-        ttk.Checkbutton(
-            body,
-            text="Crear también acceso directo en el Escritorio",
-            variable=self.var_desktop_shortcut,
-            bootstyle="success-round-toggle",
-        ).grid(row=7, column=1, sticky="w", pady=(10, 4))
+        # Desktop shortcut toggle
+        self._shortcut_check = QCheckBox("Crear también acceso directo en el Escritorio")
+        form.addRow("", self._shortcut_check)
 
-    def _build_advanced_tab(self, parent: ttk.Frame) -> None:
-        scroll = ScrollableFrame(parent)
-        scroll.pack(fill="both", expand=True)
-        body = scroll.inner
-        body.columnconfigure(0, weight=1)
+        scroll.setWidget(host)
+        return scroll
 
-        # 1. Java / JVM Section (shown only for JAR)
-        self._jvm_section = ttk.Labelframe(body, text=" Configuración Java / JVM (.jar) ", padding=10)
-        self._jvm_section.columnconfigure(1, weight=1)
+    def _build_advanced_tab(self) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(12)
 
-        ttk.Label(self._jvm_section, text="Runtime Java / JDK:").grid(row=0, column=0, sticky="w", pady=4)
-        java_values = ["java"] + [rt.path for rt in self._java_runtimes]
-        java_combo = ttk.Combobox(self._jvm_section, textvariable=self.var_java_path, values=java_values)
-        java_combo.grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=4)
+        # 1. Java / JVM Section
+        self._jvm_box = QGroupBox("Configuración Java / JVM (.jar)")
+        jvm_form = QFormLayout(self._jvm_box)
+        jvm_form.setSpacing(8)
+
+        self._java_combo = QComboBox()
+        self._java_combo.setEditable(True)
+        self._java_combo.addItem("java")
+        for rt in self._java_runtimes:
+            self._java_combo.addItem(rt.path)
+        jvm_form.addRow("Runtime Java / JDK:", self._java_combo)
 
         if self._java_runtimes:
-            summary = "Detectados: " + " · ".join(rt.version for rt in self._java_runtimes[:3])
-            ttk.Label(self._jvm_section, text=summary, bootstyle="secondary", font=("Sans", 8)).grid(
-                row=1, column=1, sticky="w", padx=(8, 0)
-            )
+            det_lbl = QLabel("Detectados: " + " · ".join(rt.version for rt in self._java_runtimes[:3]))
+            det_lbl.setProperty("muted", True)
+            det_lbl.setStyleSheet("font-size: 11px;")
+            jvm_form.addRow("", det_lbl)
 
-        mem_row = ttk.Frame(self._jvm_section)
-        mem_row.grid(row=2, column=0, columnspan=2, sticky="ew", pady=6)
-        ttk.Label(mem_row, text="Memoria Máx (-Xmx):").pack(side="left")
-        ttk.Combobox(
-            mem_row,
-            textvariable=self.var_xmx,
-            values=["", "512M", "1G", "2G", "4G", "6G", "8G", "16G"],
-            width=10,
-        ).pack(side="left", padx=(6, 16))
-        ttk.Label(mem_row, text="Memoria Inicial (-Xms):").pack(side="left")
-        ttk.Combobox(
-            mem_row,
-            textvariable=self.var_xms,
-            values=["", "256M", "512M", "1G", "2G"],
-            width=10,
-        ).pack(side="left", padx=(6, 0))
+        mem_row = QHBoxLayout()
+        mem_row.setSpacing(8)
+        self._xmx_combo = QComboBox()
+        self._xmx_combo.setEditable(True)
+        self._xmx_combo.addItems(["", "512M", "1G", "2G", "4G", "6G", "8G", "16G"])
+        self._xmx_combo.setMinimumWidth(100)
+        mem_row.addWidget(QLabel("Máx (-Xmx):"))
+        mem_row.addWidget(self._xmx_combo)
 
-        ttk.Label(self._jvm_section, text="Flags JVM extra:").grid(row=3, column=0, sticky="w", pady=4)
-        ttk.Entry(self._jvm_section, textvariable=self.var_jvm_args).grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=4)
+        self._xms_combo = QComboBox()
+        self._xms_combo.setEditable(True)
+        self._xms_combo.addItems(["", "256M", "512M", "1G", "2G"])
+        self._xms_combo.setMinimumWidth(100)
+        mem_row.addSpacing(12)
+        mem_row.addWidget(QLabel("Inicial (-Xms):"))
+        mem_row.addWidget(self._xms_combo)
+        mem_row.addStretch(1)
+        jvm_form.addRow("Memoria JVM:", mem_row)
 
-        # 2. WebApp Browser Section (shown only for WEBAPP)
-        self._webapp_section = ttk.Labelframe(body, text=" Configuración WebApp ", padding=10)
-        self._webapp_section.columnconfigure(1, weight=1)
-        ttk.Label(self._webapp_section, text="Navegador:").grid(row=0, column=0, sticky="w", pady=4)
-        browser_vals = [b[0] for b in self._browsers] or ["chromium", "google-chrome", "firefox"]
-        ttk.Combobox(self._webapp_section, textvariable=self.var_browser, values=browser_vals).grid(
-            row=0, column=1, sticky="ew", padx=(8, 0), pady=4
-        )
+        self._jvm_args_edit = QLineEdit()
+        self._jvm_args_edit.setPlaceholderText("ej. -XX:+UseG1GC -Dsun.java2d.opengl=true")
+        jvm_form.addRow("Flags JVM extra:", self._jvm_args_edit)
+        layout.addWidget(self._jvm_box)
 
-        # 3. Script Interpreter Section (shown only for SCRIPT)
-        self._script_section = ttk.Labelframe(body, text=" Configuración Script ", padding=10)
-        self._script_section.columnconfigure(1, weight=1)
-        ttk.Label(self._script_section, text="Intérprete (vacío = usar #!):").grid(row=0, column=0, sticky="w", pady=4)
-        ttk.Combobox(
-            self._script_section,
-            textvariable=self.var_interpreter,
-            values=["", "bash", "python3", "sh", "node", "ruby"],
-        ).grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=4)
+        # 2. WebApp Section
+        self._webapp_box = QGroupBox("Configuración WebApp")
+        web_form = QFormLayout(self._webapp_box)
+        self._browser_combo = QComboBox()
+        self._browser_combo.setEditable(True)
+        browsers = [b[0] for b in self._browsers] or ["chromium", "google-chrome", "firefox"]
+        self._browser_combo.addItems(browsers)
+        web_form.addRow("Navegador:", self._browser_combo)
+        layout.addWidget(self._webapp_box)
+
+        # 3. Script Section
+        self._script_box = QGroupBox("Configuración Script")
+        scr_form = QFormLayout(self._script_box)
+        self._interp_combo = QComboBox()
+        self._interp_combo.setEditable(True)
+        self._interp_combo.addItems(["", "bash", "python3", "sh", "node", "ruby"])
+        scr_form.addRow("Intérprete (vacío = usar #!):", self._interp_combo)
+        layout.addWidget(self._script_box)
 
         # 4. Execution & Desktop Options
-        self._exec_section = ttk.Labelframe(body, text=" Ejecución y Escritorio ", padding=10)
-        exec_section = self._exec_section
-        exec_section.pack(fill="x", pady=(0, 10))
-        exec_section.columnconfigure(1, weight=1)
+        exec_box = QGroupBox("Ejecución y Escritorio")
+        exec_form = QFormLayout(exec_box)
+        exec_form.setSpacing(8)
 
-        ttk.Label(exec_section, text="Argumentos CLI:").grid(row=0, column=0, sticky="w", pady=4)
-        ttk.Entry(exec_section, textvariable=self.var_args).grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=4)
+        self._args_edit = QLineEdit()
+        self._args_edit.setPlaceholderText("Argumentos CLI adicionales (ej. --fullscreen --profile work)")
+        exec_form.addRow("Argumentos CLI:", self._args_edit)
 
-        ttk.Label(exec_section, text="Directorio de trabajo:").grid(row=1, column=0, sticky="w", pady=4)
-        wd_row = ttk.Frame(exec_section)
-        wd_row.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=4)
-        wd_row.columnconfigure(0, weight=1)
-        ttk.Entry(wd_row, textvariable=self.var_workdir).grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ttk.Button(wd_row, text="Carpeta...", bootstyle="secondary-outline", command=self._browse_workdir).grid(
-            row=0, column=1
-        )
+        wd_row = QHBoxLayout()
+        wd_row.setSpacing(6)
+        self._workdir_edit = QLineEdit()
+        self._workdir_edit.setPlaceholderText("Directorio de trabajo (Path=)")
+        wd_row.addWidget(self._workdir_edit, stretch=1)
+        wd_btn = QPushButton("Carpeta...")
+        wd_btn.clicked.connect(self._browse_workdir)
+        wd_row.addWidget(wd_btn)
+        exec_form.addRow("Directorio trabajo:", wd_row)
 
-        ttk.Label(exec_section, text="StartupWMClass:").grid(row=2, column=0, sticky="w", pady=4)
-        ttk.Entry(exec_section, textvariable=self.var_wm_class).grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=4)
+        self._wm_class_edit = QLineEdit()
+        self._wm_class_edit.setPlaceholderText("Opcional: agrupa ventanas correctamente en la barra de tareas")
+        exec_form.addRow("StartupWMClass:", self._wm_class_edit)
 
-        ttk.Label(exec_section, text="Palabras clave (;):").grid(row=3, column=0, sticky="w", pady=4)
-        ttk.Entry(exec_section, textvariable=self.var_keywords).grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=4)
+        self._keywords_edit = QLineEdit()
+        self._keywords_edit.setPlaceholderText("Separadas por ';' (ej. editor;notas;markdown)")
+        exec_form.addRow("Palabras clave:", self._keywords_edit)
 
-        toggles = ttk.Frame(exec_section)
-        toggles.grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 2))
-        ttk.Checkbutton(
-            toggles,
-            text="Preferir GPU dedicada (DRI_PRIME / PrefersNonDefaultGPU)",
-            variable=self.var_gpu,
-            bootstyle="warning-round-toggle",
-        ).pack(anchor="w", pady=2)
-        ttk.Checkbutton(
-            toggles,
-            text="Ejecutar en Terminal",
-            variable=self.var_terminal,
-            bootstyle="info-round-toggle",
-        ).pack(anchor="w", pady=2)
-        ttk.Checkbutton(
-            toggles,
-            text="Ocultar del menú (NoDisplay=true)",
-            variable=self.var_nodisplay,
-            bootstyle="secondary-round-toggle",
-        ).pack(anchor="w", pady=2)
+        self._gpu_check = QCheckBox("Preferir GPU dedicada (PrefersNonDefaultGPU=true + DRI_PRIME=1)")
+        self._terminal_check = QCheckBox("Ejecutar en Terminal")
+        self._nodisplay_check = QCheckBox("Ocultar del menú de aplicaciones (NoDisplay=true)")
+        exec_form.addRow("", self._gpu_check)
+        exec_form.addRow("", self._terminal_check)
+        exec_form.addRow("", self._nodisplay_check)
+        layout.addWidget(exec_box)
 
         # 5. Environment Variables Editor
-        env_section = ttk.Labelframe(body, text=" Variables de entorno (KEY=VALUE) ", padding=10)
-        env_section.pack(fill="x", pady=(0, 8))
+        env_box = QGroupBox("Variables de entorno (KEY=VALUE)")
+        env_v = QVBoxLayout(env_box)
+        env_v.setSpacing(8)
 
-        add_row = ttk.Frame(env_section)
-        add_row.pack(fill="x", pady=(0, 6))
-        self._env_key_entry = ttk.Entry(add_row, width=22)
-        self._env_key_entry.pack(side="left", padx=(0, 6))
-        self._env_key_entry.insert(0, "CLAVE")
-        ttk.Label(add_row, text="=").pack(side="left", padx=(0, 6))
-        self._env_val_entry = ttk.Entry(add_row)
-        self._env_val_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        ttk.Button(add_row, text="＋ Agregar", bootstyle="info-outline", command=self._add_env_var).pack(side="left")
+        add_row = QHBoxLayout()
+        add_row.setSpacing(6)
+        self._env_key_edit = QLineEdit()
+        self._env_key_edit.setPlaceholderText("CLAVE (ej. SDL_VIDEODRIVER)")
+        add_row.addWidget(self._env_key_edit, stretch=2)
+        add_row.addWidget(QLabel("="))
+        self._env_val_edit = QLineEdit()
+        self._env_val_edit.setPlaceholderText("VALOR (ej. wayland)")
+        add_row.addWidget(self._env_val_edit, stretch=3)
+        add_env_btn = QPushButton("＋ Agregar")
+        add_env_btn.setProperty("variant", "primary")
+        add_env_btn.clicked.connect(self._add_env_var)
+        add_row.addWidget(add_env_btn)
+        env_v.addLayout(add_row)
 
-        self._env_tree = ttk.Treeview(env_section, columns=("key", "val"), show="headings", height=4)
-        self._env_tree.heading("key", text="Variable")
-        self._env_tree.heading("val", text="Valor")
-        self._env_tree.column("key", width=200)
-        self._env_tree.column("val", width=420)
-        self._env_tree.pack(fill="x", pady=(0, 6))
+        self._env_table = QTableWidget(0, 2)
+        self._env_table.setHorizontalHeaderLabels(["Variable", "Valor"])
+        self._env_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self._env_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._env_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._env_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._env_table.setMinimumHeight(110)
+        self._env_table.setMaximumHeight(160)
+        env_v.addWidget(self._env_table)
 
-        ttk.Button(
-            env_section,
-            text="Eliminar seleccionada",
-            bootstyle="danger-outline",
-            command=self._remove_selected_env,
-        ).pack(anchor="e")
-        self._refresh_env_tree()
+        rm_env_btn = QPushButton("Eliminar seleccionada")
+        rm_env_btn.setProperty("variant", "danger")
+        rm_env_btn.clicked.connect(self._remove_selected_env)
+        env_v.addWidget(rm_env_btn, alignment=Qt.AlignmentFlag.AlignRight)
+        layout.addWidget(env_box)
 
-    def _build_preview_tab(self, parent: ttk.Frame) -> None:
-        top = ttk.Frame(parent)
-        top.pack(fill="x", pady=(0, 8))
-        ttk.Label(top, text="Archivo .desktop generado (FreeDesktop Spec v1.5):", font=("Sans", 10, "bold")).pack(
-            side="left"
-        )
-        ttk.Button(top, text="✓ Validar ahora", bootstyle="info-outline", command=self._refresh_preview).pack(side="right")
+        layout.addStretch(1)
+        scroll.setWidget(host)
+        return scroll
 
-        self._preview_text = tk.Text(parent, height=18, font=("Monospace", 10), wrap="none")
-        self._preview_text.pack(fill="both", expand=True)
+    def _build_preview_tab(self) -> QWidget:
+        tab = QWidget()
+        v = QVBoxLayout(tab)
+        v.setContentsMargins(14, 14, 14, 14)
+        v.setSpacing(10)
 
-        self._validation_lbl = ttk.Label(parent, text="", font=("Sans", 9, "bold"), wraplength=740, justify="left")
-        self._validation_lbl.pack(anchor="w", pady=(8, 0))
+        top = QHBoxLayout()
+        lbl = QLabel("Archivo .desktop generado (FreeDesktop Desktop Entry Spec v1.5):")
+        lbl.setStyleSheet("font-weight: 700;")
+        top.addWidget(lbl)
+        top.addStretch(1)
+        val_btn = QPushButton("✓ Validar ahora")
+        val_btn.setProperty("variant", "primary")
+        val_btn.clicked.connect(self._refresh_preview)
+        top.addWidget(val_btn)
+        v.addLayout(top)
+
+        self._preview_text = QPlainTextEdit()
+        self._preview_text.setReadOnly(True)
+        mono = QFont("Monospace", 10)
+        mono.setStyleHint(QFont.StyleHint.TypeWriter)
+        self._preview_text.setFont(mono)
+        v.addWidget(self._preview_text, stretch=1)
+
+        self._validation_lbl = QLabel("")
+        self._validation_lbl.setWordWrap(True)
+        v.addWidget(self._validation_lbl)
+        return tab
+
+    # ------------------------------------------------------------ Data Binding
+
+    def _populate_initial_values(self, initial_target: str) -> None:
+        ex = self._existing
+        self._target_edit.setText(ex.exec_target if ex else initial_target)
+        self._name_edit.setText(ex.name if ex else "")
+        self._version_edit.setText(ex.version if ex else "")
+        self._comment_edit.setText(ex.comment if ex else "")
+        self._icon_edit.setText(ex.icon_path if ex else "")
+        self._type_buttons[self._current_type].setChecked(True)
+
+        selected_cats = set(ex.categories if ex else ["Utility"])
+        for code, cb in self._cat_checks.items():
+            cb.setChecked(code in selected_cats)
+
+        default_mode_str = ex.storage_mode.value if ex else self._cfg.default_storage_mode
+        try:
+            st_mode = StorageMode(default_mode_str)
+        except ValueError:
+            st_mode = StorageMode.MOVE
+        self._storage_radios[st_mode].setChecked(True)
+
+        self._shortcut_check.setChecked(ex.create_desktop_shortcut if ex else self._cfg.default_desktop_shortcut)
+        self._java_combo.setCurrentText(ex.java_options.java_path if ex else "java")
+        self._xmx_combo.setCurrentText(ex.java_options.max_memory if ex else "")
+        self._xms_combo.setCurrentText(ex.java_options.min_memory if ex else "")
+        self._jvm_args_edit.setText(" ".join(ex.java_options.jvm_args) if ex else "")
+
+        if ex and ex.webapp_browser:
+            self._browser_combo.setCurrentText(ex.webapp_browser)
+        self._interp_combo.setCurrentText(ex.script_interpreter if ex else "")
+        self._args_edit.setText(" ".join(ex.args) if ex else "")
+        self._workdir_edit.setText(ex.working_dir if ex else "")
+        self._wm_class_edit.setText(ex.startup_wm_class if ex else "")
+        self._keywords_edit.setText("; ".join(ex.keywords) if ex else "")
+        self._gpu_check.setChecked(ex.dedicated_gpu if ex else False)
+        self._terminal_check.setChecked(ex.terminal if ex else False)
+        self._nodisplay_check.setChecked(ex.no_display if ex else False)
+        self._refresh_env_table()
+
+    def _set_app_type(self, app_type: AppType) -> None:
+        self._current_type = app_type
+        self._type_buttons[app_type].setChecked(True)
+        self._sync_conditional_sections()
+        self._refresh_icon_preview()
+
+    def _sync_conditional_sections(self) -> None:
+        self._jvm_box.setVisible(self._current_type == AppType.JAR)
+        self._webapp_box.setVisible(self._current_type == AppType.WEBAPP)
+        self._script_box.setVisible(self._current_type == AppType.SCRIPT)
+
+        if not self._is_edit:
+            show_storage = self._current_type != AppType.WEBAPP
+            self._storage_label.setVisible(show_storage)
+            self._storage_widget.setVisible(show_storage)
 
     # ------------------------------------------------------------ Interactions
 
-    def _sync_conditional_sections(self) -> None:
-        try:
-            current_type = AppType(self.var_type.get())
-        except ValueError:
-            current_type = AppType.BINARY
-
-        for section in (self._jvm_section, self._webapp_section, self._script_section):
-            section.pack_forget()
-
-        if current_type == AppType.JAR:
-            self._jvm_section.pack(fill="x", pady=(0, 10), before=self._exec_section)
-        elif current_type == AppType.WEBAPP:
-            self._webapp_section.pack(fill="x", pady=(0, 10), before=self._exec_section)
-        elif current_type == AppType.SCRIPT:
-            self._script_section.pack(fill="x", pady=(0, 10), before=self._exec_section)
-
-        if not self._is_edit:
-            if current_type == AppType.WEBAPP:
-                self._storage_label.grid_remove()
-                self._storage_frame.grid_remove()
-            else:
-                self._storage_label.grid()
-                self._storage_frame.grid()
-
     def _browse_target(self) -> None:
-        path = filedialog.askopenfilename(
-            parent=self,
-            title="Seleccionar archivo ejecutable",
-            filetypes=[
-                ("Aplicaciones soportadas", "*.AppImage *.appimage *.jar *.sh *.py *.bin *.run"),
-                ("AppImage", "*.AppImage *.appimage"),
-                ("Java JAR", "*.jar"),
-                ("Scripts", "*.sh *.bash *.py *.rb *.js"),
-                ("Todos los archivos", "*"),
-            ],
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Seleccionar archivo ejecutable",
+            str(self._services.paths.downloads_dir),
+            "Aplicaciones (*.AppImage *.appimage *.jar *.sh *.py *.bin *.run);;AppImage (*.AppImage *.appimage);;Java JAR (*.jar);;Todos los archivos (*)",
         )
         if path:
-            self.var_target.set(path)
+            self._target_edit.setText(path)
             self._run_inspection(path)
 
     def _browse_icon(self) -> None:
-        path = filedialog.askopenfilename(
-            parent=self,
-            title="Seleccionar ícono",
-            filetypes=[("Imágenes e íconos", "*.png *.svg *.ico *.jpg *.jpeg *.webp"), ("Todos", "*")],
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Seleccionar ícono",
+            "",
+            "Imágenes e íconos (*.png *.svg *.ico *.jpg *.jpeg *.webp);;Todos los archivos (*)",
         )
         if path:
-            self.var_icon.set(path)
+            self._icon_edit.setText(path)
 
     def _browse_workdir(self) -> None:
-        path = filedialog.askdirectory(parent=self, title="Seleccionar directorio de trabajo")
+        path = QFileDialog.getExistingDirectory(self, "Seleccionar directorio de trabajo", self._workdir_edit.text())
         if path:
-            self.var_workdir.set(path)
+            self._workdir_edit.setText(path)
 
     def _trigger_inspect(self) -> None:
-        target = self.var_target.get().strip()
+        target = self._target_edit.text().strip()
         if target:
             self._run_inspection(target)
 
     def _run_inspection(self, target: str) -> None:
-        self._status_lbl.configure(text="Analizando...")
-        self._progress.pack(side="right")
-        self._progress.start(12)
+        self._status_lbl.setText("Analizando...")
+        self._progress.show()
+        self._error_lbl.setText("")
 
         def _done(result: object) -> None:
-            self._progress.stop()
-            self._progress.pack_forget()
-            self._status_lbl.configure(text="✓ Metadatos detectados")
+            self._progress.hide()
+            self._status_lbl.setText("✓ Metadatos detectados")
             if isinstance(result, DetectionResult):
                 self._apply_detection(result)
 
         def _err(exc: Exception) -> None:
-            self._progress.stop()
-            self._progress.pack_forget()
-            self._status_lbl.configure(text="")
-            self._error_lbl.configure(text=f"Error al inspeccionar: {exc}")
+            self._progress.hide()
+            self._status_lbl.setText("")
+            self._error_lbl.setText(f"Error al inspeccionar: {exc}")
 
-        run_in_background(self, lambda: self._services.app_service.inspect_target(target), _done, _err)
+        run_async(self, lambda: self._services.app_service.inspect_target(target), _done, _err)
 
     def _apply_detection(self, det: DetectionResult) -> None:
-        self.var_target.set(det.target)
-        self.var_type.set(det.app_type.value)
+        self._target_edit.setText(det.target)
+        self._set_app_type(det.app_type)
         if det.suggested_name:
-            self.var_name.set(det.suggested_name)
+            self._name_edit.setText(det.suggested_name)
         if det.comment:
-            self.var_comment.set(det.comment)
+            self._comment_edit.setText(det.comment)
         if det.version:
-            self.var_version.set(det.version)
+            self._version_edit.setText(det.version)
         if det.working_dir:
-            self.var_workdir.set(det.working_dir)
+            self._workdir_edit.setText(det.working_dir)
         if det.startup_wm_class:
-            self.var_wm_class.set(det.startup_wm_class)
+            self._wm_class_edit.setText(det.startup_wm_class)
         if det.script_interpreter:
-            self.var_interpreter.set(det.script_interpreter)
+            self._interp_combo.setCurrentText(det.script_interpreter)
         if det.webapp_browser:
-            self.var_browser.set(det.webapp_browser)
-        self.var_terminal.set(det.terminal)
+            self._browser_combo.setCurrentText(det.webapp_browser)
+        self._terminal_check.setChecked(det.terminal)
 
-        # Update categories checkboxes
-        for code, var in self._cat_vars.items():
-            var.set(code in det.categories)
+        for code, cb in self._cat_checks.items():
+            cb.setChecked(code in det.categories)
 
-        # Update icon candidates & gallery
         self._icon_candidates = list(det.icon_candidates)
         if det.selected_icon:
-            self.var_icon.set(det.selected_icon)
+            self._icon_edit.setText(det.selected_icon)
         self._render_icon_gallery()
 
         if det.warnings:
-            self._warning_lbl.configure(text="⚠ " + " | ".join(det.warnings))
-            self._warning_lbl.pack(fill="x", pady=(0, 6), before=self._notebook)
+            self._warning_lbl.setText("⚠  " + " | ".join(det.warnings))
+            self._warning_lbl.show()
         else:
-            self._warning_lbl.pack_forget()
+            self._warning_lbl.hide()
 
     def _refresh_icon_preview(self) -> None:
-        try:
-            app_type = AppType(self.var_type.get())
-        except ValueError:
-            app_type = AppType.BINARY
-        icon_path = self.var_icon.get().strip()
+        icon_path = self._icon_edit.text().strip()
         if not icon_path:
-            icon_path = str(self._services.icon_store.default_icon_for(app_type))
-        photo = self._icon_cache.get_icon(icon_path, size=64, app_name=self.var_name.get() or "D", app_type=app_type)
-        self._icon_preview_lbl.configure(image=photo)
-        self._icon_preview_lbl.image = photo
+            icon_path = str(self._services.icon_store.default_icon_for(self._current_type))
+        pm = self._icon_provider.get_pixmap(
+            icon_path,
+            size=60,
+            app_name=self._name_edit.text() or "D",
+            app_type=self._current_type,
+        )
+        self._icon_preview.setPixmap(pm)
 
     def _render_icon_gallery(self) -> None:
-        for child in self._icon_gallery.winfo_children():
-            child.destroy()
+        while self._gallery_layout.count():
+            item = self._gallery_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
         if not self._icon_candidates:
+            self._gallery_host.hide()
             return
-        ttk.Label(self._icon_gallery, text="Extraídos:", bootstyle="secondary", font=("Sans", 8)).pack(
-            side="left", padx=(0, 6)
-        )
-        try:
-            app_type = AppType(self.var_type.get())
-        except ValueError:
-            app_type = AppType.BINARY
+
+        lbl = QLabel("Extraídos:")
+        lbl.setProperty("muted", True)
+        lbl.setStyleSheet("font-size: 11px;")
+        self._gallery_layout.addWidget(lbl)
+
         for cand in self._icon_candidates[:6]:
-            thumb = self._icon_cache.get_icon(cand, size=32, app_name="I", app_type=app_type)
-            btn = ttk.Button(
-                self._icon_gallery,
-                image=thumb,
-                bootstyle="secondary-outline",
-                command=lambda p=cand: self.var_icon.set(p),
-            )
-            btn.image = thumb
-            btn.pack(side="left", padx=(0, 4))
+            btn = QPushButton()
+            btn.setFixedSize(40, 40)
+            btn.setIcon(self._icon_provider.get_qicon(cand, size=30, app_name="I", app_type=self._current_type))
+            btn.setIconSize(QSize(30, 30))
+            btn.setToolTip(cand)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _c=False, p=cand: self._icon_edit.setText(p))
+            self._gallery_layout.addWidget(btn)
+
+        self._gallery_layout.addStretch(1)
+        self._gallery_host.show()
 
     def _add_env_var(self) -> None:
-        k = self._env_key_entry.get().strip()
-        v = self._env_val_entry.get().strip()
-        if not k or k == "CLAVE":
+        key = self._env_key_edit.text().strip()
+        val = self._env_val_edit.text().strip()
+        if not key:
             return
-        self._env_vars[k] = v
-        self._env_key_entry.delete(0, "end")
-        self._env_val_entry.delete(0, "end")
-        self._refresh_env_tree()
+        self._env_vars[key] = val
+        self._env_key_edit.clear()
+        self._env_val_edit.clear()
+        self._refresh_env_table()
 
     def _remove_selected_env(self) -> None:
-        for item in self._env_tree.selection():
-            vals = self._env_tree.item(item, "values")
-            if vals:
-                self._env_vars.pop(str(vals[0]), None)
-        self._refresh_env_tree()
+        rows = sorted({idx.row() for idx in self._env_table.selectedIndexes()}, reverse=True)
+        for row in rows:
+            item = self._env_table.item(row, 0)
+            if item is not None:
+                self._env_vars.pop(item.text(), None)
+        self._refresh_env_table()
 
-    def _refresh_env_tree(self) -> None:
-        for item in self._env_tree.get_children():
-            self._env_tree.delete(item)
-        for k, v in sorted(self._env_vars.items()):
-            self._env_tree.insert("", "end", values=(k, v))
+    def _refresh_env_table(self) -> None:
+        self._env_table.setRowCount(0)
+        for key, val in sorted(self._env_vars.items()):
+            r = self._env_table.rowCount()
+            self._env_table.insertRow(r)
+            self._env_table.setItem(r, 0, QTableWidgetItem(key))
+            self._env_table.setItem(r, 1, QTableWidgetItem(val))
+
+    def _selected_storage_mode(self) -> StorageMode:
+        for mode, rb in self._storage_radios.items():
+            if rb.isChecked():
+                return mode
+        return StorageMode.KEEP
 
     def _build_managed_app_from_form(self) -> ManagedApp:
-        selected_cats = [code for code, var in self._cat_vars.items() if var.get()]
-        if not selected_cats:
-            selected_cats = ["Utility"]
+        selected_cats = [code for code, cb in self._cat_checks.items() if cb.isChecked()] or ["Utility"]
 
+        raw_args = self._args_edit.text().strip()
         try:
-            extra_args = shlex.split(self.var_args.get().strip()) if self.var_args.get().strip() else []
+            extra_args = shlex.split(raw_args) if raw_args else []
         except ValueError:
-            extra_args = self.var_args.get().split()
+            extra_args = raw_args.split()
 
+        raw_jvm = self._jvm_args_edit.text().strip()
         try:
-            jvm_args = shlex.split(self.var_jvm_args.get().strip()) if self.var_jvm_args.get().strip() else []
+            jvm_args = shlex.split(raw_jvm) if raw_jvm else []
         except ValueError:
-            jvm_args = self.var_jvm_args.get().split()
+            jvm_args = raw_jvm.split()
 
-        keywords = [k.strip() for k in self.var_keywords.get().replace(",", ";").split(";") if k.strip()]
+        keywords = [k.strip() for k in self._keywords_edit.text().replace(",", ";").split(";") if k.strip()]
 
-        app_kwargs = dict(
-            name=self.var_name.get().strip(),
-            app_type=AppType(self.var_type.get()),
-            exec_target=self.var_target.get().strip(),
-            icon_path=self.var_icon.get().strip(),
-            comment=self.var_comment.get().strip(),
+        kwargs = dict(
+            name=self._name_edit.text().strip(),
+            app_type=self._current_type,
+            exec_target=self._target_edit.text().strip(),
+            icon_path=self._icon_edit.text().strip(),
+            comment=self._comment_edit.text().strip(),
             categories=selected_cats,
             keywords=keywords,
             args=extra_args,
             env_vars=dict(self._env_vars),
-            working_dir=self.var_workdir.get().strip(),
-            terminal=self.var_terminal.get(),
-            dedicated_gpu=self.var_gpu.get(),
-            startup_wm_class=self.var_wm_class.get().strip(),
-            no_display=self.var_nodisplay.get(),
-            create_desktop_shortcut=self.var_desktop_shortcut.get(),
-            storage_mode=StorageMode(self.var_storage.get()),
+            working_dir=self._workdir_edit.text().strip(),
+            terminal=self._terminal_check.isChecked(),
+            dedicated_gpu=self._gpu_check.isChecked(),
+            startup_wm_class=self._wm_class_edit.text().strip(),
+            no_display=self._nodisplay_check.isChecked(),
+            create_desktop_shortcut=self._shortcut_check.isChecked(),
+            storage_mode=self._selected_storage_mode(),
             java_options=JavaOptions(
-                java_path=self.var_java_path.get().strip() or "java",
-                max_memory=self.var_xmx.get().strip(),
-                min_memory=self.var_xms.get().strip(),
+                java_path=self._java_combo.currentText().strip() or "java",
+                max_memory=self._xmx_combo.currentText().strip(),
+                min_memory=self._xms_combo.currentText().strip(),
                 jvm_args=jvm_args,
             ),
-            script_interpreter=self.var_interpreter.get().strip(),
-            webapp_browser=self.var_browser.get().strip(),
-            version=self.var_version.get().strip(),
+            script_interpreter=self._interp_combo.currentText().strip(),
+            webapp_browser=self._browser_combo.currentText().strip(),
+            version=self._version_edit.text().strip(),
         )
         if self._existing:
-            app_kwargs["id"] = self._existing.id
-            app_kwargs["desktop_file_path"] = self._existing.desktop_file_path
-            app_kwargs["desktop_shortcut_path"] = self._existing.desktop_shortcut_path
-            app_kwargs["created_at"] = self._existing.created_at
-            app_kwargs["sha256"] = self._existing.sha256
-        return ManagedApp(**app_kwargs)
+            kwargs["id"] = self._existing.id
+            kwargs["desktop_file_path"] = self._existing.desktop_file_path
+            kwargs["desktop_shortcut_path"] = self._existing.desktop_shortcut_path
+            kwargs["created_at"] = self._existing.created_at
+            kwargs["sha256"] = self._existing.sha256
+        return ManagedApp(**kwargs)
 
-    def _on_tab_changed(self, _event=None) -> None:
-        if self._notebook.index("current") == 2:
+    def _on_tab_changed(self, index: int) -> None:
+        if index == 2:
             self._refresh_preview()
 
     def _refresh_preview(self) -> None:
-        self._preview_text.configure(state="normal")
-        self._preview_text.delete("1.0", "end")
         try:
             draft = self._build_managed_app_from_form()
             content, report = self._services.app_service.preview_desktop_entry(draft)
-            self._preview_text.insert("1.0", content)
+            self._preview_text.setPlainText(content)
             if report.valid:
                 suffix = " (verificado con desktop-file-validate)" if report.used_external_validator else ""
                 warn_txt = f" · Avisos: {'; '.join(report.warnings)}" if report.warnings else ""
-                self._validation_lbl.configure(text=f"✓ Archivo .desktop válido{suffix}{warn_txt}", bootstyle="success")
+                self._validation_lbl.setText(f"✓ Archivo .desktop válido{suffix}{warn_txt}")
+                self._validation_lbl.setStyleSheet("color: #22c55e; font-weight: 600;")
             else:
-                self._validation_lbl.configure(text="✕ Errores: " + " | ".join(report.errors), bootstyle="danger")
+                self._validation_lbl.setText("✕ Errores: " + " | ".join(report.errors))
+                self._validation_lbl.setStyleSheet("color: #ef4444; font-weight: 600;")
         except DeskForgeError as exc:
-            self._preview_text.insert("1.0", f"# Completá los campos obligatorios para generar la vista previa.\n# {exc}\n")
-            self._validation_lbl.configure(text=str(exc), bootstyle="warning")
-        self._preview_text.configure(state="disabled")
+            self._preview_text.setPlainText(
+                f"# Completá los campos obligatorios para generar la vista previa.\n# {exc}\n"
+            )
+            self._validation_lbl.setText(str(exc))
+            self._validation_lbl.setStyleSheet("color: #f59e0b; font-weight: 600;")
 
     def _on_submit(self) -> None:
-        self._error_lbl.configure(text="")
+        self._error_lbl.setText("")
         try:
             app = self._build_managed_app_from_form()
             if self._is_edit:
@@ -663,11 +763,11 @@ class AppEditorDialog(ttk.Toplevel):
             else:
                 saved = self._services.app_service.integrate_app(app, source_icon=app.icon_path)
         except DeskForgeError as exc:
-            self._error_lbl.configure(text=str(exc))
+            self._error_lbl.setText(str(exc))
             return
         except Exception as exc:
-            self._error_lbl.configure(text=f"Error inesperado: {exc}")
+            self._error_lbl.setText(f"Error inesperado: {exc}")
             return
 
-        self.destroy()
+        self.accept()
         self._on_saved(saved, self._is_edit)
