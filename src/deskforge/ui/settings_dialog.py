@@ -1,25 +1,42 @@
-"""Settings, System Self-Installation, and Doctor Diagnostic dialog."""
+"""Settings, System Self-Install, and Doctor Diagnostic QDialog (PySide6)."""
 
 from __future__ import annotations
 
-import tkinter as tk
-from tkinter import filedialog
 from typing import Callable
 
-import ttkbootstrap as ttk
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QFileDialog,
+    QFormLayout,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from deskforge.application import ServiceContainer
 from deskforge.domain.models import IssueSeverity, StorageMode
-from deskforge.ui.theme import ALL_THEMES
-from deskforge.ui.widgets import center_window
+from deskforge.ui.theme import AVAILABLE_THEMES
 
 
-class SettingsAndDoctorDialog(ttk.Toplevel):
-    """Modal dialog for configuring DeskForge, self-installing MIME handlers, and running Doctor."""
+class SettingsAndDoctorDialog(QDialog):
+    """Modal dialog for DeskForge preferences, self-installation into MIME/menu, and Doctor checks."""
 
     def __init__(
         self,
-        parent: tk.Misc,
+        parent: QWidget,
         services: ServiceContainer,
         current_theme: str,
         on_theme_change: Callable[[str], None],
@@ -29,187 +46,212 @@ class SettingsAndDoctorDialog(ttk.Toplevel):
     ) -> None:
         super().__init__(parent)
         self._services = services
+        self._current_theme = current_theme
         self._on_theme_change = on_theme_change
         self._on_repaired = on_repaired
         self._on_toast = on_toast
 
-        cfg = services.app_service.get_config()
-        self.var_managed_dir = tk.StringVar(value=cfg.managed_apps_dir or str(services.paths.managed_apps_dir))
-        self.var_scan_dir = tk.StringVar(value=cfg.scan_directory or str(services.paths.downloads_dir))
-        self.var_storage_mode = tk.StringVar(value=cfg.default_storage_mode)
-        self.var_shortcut = tk.BooleanVar(value=cfg.default_desktop_shortcut)
-        self.var_trash = tk.BooleanVar(value=cfg.move_to_trash_on_delete)
-        self.var_theme = tk.StringVar(value=current_theme)
+        self.setWindowTitle("Ajustes y Diagnóstico — DeskForge")
+        self.resize(760, 560)
+        self.setMinimumSize(680, 500)
+        self.setModal(True)
 
-        self.title("Ajustes y Diagnóstico — DeskForge")
-        self.minsize(680, 500)
         self._build_ui(initial_tab)
-        self.bind("<Escape>", lambda _e: self.destroy())
-        self.transient(parent)
-        center_window(self, 740, 540, parent)
-        self.grab_set()
 
     def _build_ui(self, initial_tab: int) -> None:
-        root = ttk.Frame(self, padding=14)
-        root.pack(fill="both", expand=True)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(10)
 
-        nb = ttk.Notebook(root)
-        nb.pack(fill="both", expand=True, pady=(0, 10))
+        tabs = QTabWidget()
+        tabs.addTab(self._build_prefs_tab(), "  ⚙ Preferencias e Integración  ")
+        tabs.addTab(self._build_doctor_tab(), "  🩺 Diagnóstico (Doctor)  ")
+        tabs.setCurrentIndex(initial_tab)
+        root.addWidget(tabs, stretch=1)
 
-        tab_prefs = ttk.Frame(nb, padding=12)
-        tab_doctor = ttk.Frame(nb, padding=12)
-        nb.add(tab_prefs, text="  ⚙ Preferencias e Integración  ")
-        nb.add(tab_doctor, text="  🩺 Diagnóstico (Doctor)  ")
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        close_btn = QPushButton("Cerrar")
+        close_btn.clicked.connect(self.reject)
+        footer.addWidget(close_btn)
 
-        self._build_prefs_tab(tab_prefs)
-        self._build_doctor_tab(tab_doctor)
-        nb.select(initial_tab)
+        save_btn = QPushButton("💾 Guardar preferencias")
+        save_btn.setProperty("variant", "success")
+        save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        save_btn.clicked.connect(self._save_prefs)
+        footer.addWidget(save_btn)
+        root.addLayout(footer)
 
-        footer = ttk.Frame(root)
-        footer.pack(fill="x")
-        ttk.Button(footer, text="Cerrar", bootstyle="secondary-outline", command=self.destroy).pack(side="right")
-        ttk.Button(footer, text="💾 Guardar preferencias", bootstyle="success", command=self._save_prefs).pack(
-            side="right", padx=(0, 8)
-        )
+    def _build_prefs_tab(self) -> QWidget:
+        cfg = self._services.app_service.get_config()
+        tab = QWidget()
+        v = QVBoxLayout(tab)
+        v.setContentsMargins(14, 14, 14, 14)
+        v.setSpacing(12)
 
-    def _build_prefs_tab(self, parent: ttk.Frame) -> None:
-        parent.columnconfigure(1, weight=1)
+        form = QFormLayout()
+        form.setSpacing(10)
 
-        ttk.Label(parent, text="Carpeta de apps gestionadas:", font=("Sans", 10, "bold")).grid(
-            row=0, column=0, sticky="w", pady=6
-        )
-        dir_row = ttk.Frame(parent)
-        dir_row.grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=6)
-        dir_row.columnconfigure(0, weight=1)
-        ttk.Entry(dir_row, textvariable=self.var_managed_dir).grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ttk.Button(dir_row, text="Elegir...", bootstyle="secondary-outline", command=self._pick_managed_dir).grid(
-            row=0, column=1
-        )
+        # Managed apps dir
+        m_row = QHBoxLayout()
+        self._managed_edit = QLineEdit(cfg.managed_apps_dir or str(self._services.paths.managed_apps_dir))
+        m_row.addWidget(self._managed_edit, stretch=1)
+        m_btn = QPushButton("Elegir...")
+        m_btn.clicked.connect(self._pick_managed_dir)
+        m_row.addWidget(m_btn)
+        form.addRow("Carpeta de apps gestionadas:", m_row)
 
-        ttk.Label(parent, text="Carpeta de escaneo:", font=("Sans", 10, "bold")).grid(
-            row=1, column=0, sticky="w", pady=6
-        )
-        scan_row = ttk.Frame(parent)
-        scan_row.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=6)
-        scan_row.columnconfigure(0, weight=1)
-        ttk.Entry(scan_row, textvariable=self.var_scan_dir).grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ttk.Button(scan_row, text="Elegir...", bootstyle="secondary-outline", command=self._pick_scan_dir).grid(
-            row=0, column=1
-        )
+        # Scan dir
+        s_row = QHBoxLayout()
+        self._scan_edit = QLineEdit(cfg.scan_directory or str(self._services.paths.downloads_dir))
+        s_row.addWidget(self._scan_edit, stretch=1)
+        s_btn = QPushButton("Elegir...")
+        s_btn.clicked.connect(self._pick_scan_dir)
+        s_row.addWidget(s_btn)
+        form.addRow("Carpeta de escaneo:", s_row)
 
-        ttk.Label(parent, text="Almacenamiento por defecto:", font=("Sans", 10, "bold")).grid(
-            row=2, column=0, sticky="w", pady=6
-        )
-        mode_combo = ttk.Combobox(
-            parent,
-            textvariable=self.var_storage_mode,
-            values=[m.value for m in StorageMode],
-            state="readonly",
-            width=18,
-        )
-        mode_combo.grid(row=2, column=1, sticky="w", padx=(8, 0), pady=6)
+        # Default storage mode
+        self._storage_combo = QComboBox()
+        for mode in StorageMode:
+            self._storage_combo.addItem(mode.label_es, mode.value)
+        idx = self._storage_combo.findData(cfg.default_storage_mode)
+        if idx >= 0:
+            self._storage_combo.setCurrentIndex(idx)
+        form.addRow("Almacenamiento por defecto:", self._storage_combo)
 
-        ttk.Label(parent, text="Tema visual:", font=("Sans", 10, "bold")).grid(row=3, column=0, sticky="w", pady=6)
-        theme_combo = ttk.Combobox(parent, textvariable=self.var_theme, values=list(ALL_THEMES), state="readonly", width=18)
-        theme_combo.grid(row=3, column=1, sticky="w", padx=(8, 0), pady=6)
-        theme_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_theme_change(self.var_theme.get()))
+        # Theme switcher (live preview)
+        self._theme_combo = QComboBox()
+        for code, label in AVAILABLE_THEMES:
+            self._theme_combo.addItem(label, code)
+        t_idx = self._theme_combo.findData(self._current_theme)
+        if t_idx >= 0:
+            self._theme_combo.setCurrentIndex(t_idx)
+        self._theme_combo.currentIndexChanged.connect(self._on_theme_selected)
+        form.addRow("Tema visual:", self._theme_combo)
 
-        ttk.Checkbutton(
-            parent,
-            text="Crear acceso directo en el Escritorio por defecto",
-            variable=self.var_shortcut,
-            bootstyle="round-toggle",
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 3))
+        self._shortcut_check = QCheckBox("Crear acceso directo en el Escritorio por defecto")
+        self._shortcut_check.setChecked(cfg.default_desktop_shortcut)
+        form.addRow("", self._shortcut_check)
 
-        ttk.Checkbutton(
-            parent,
-            text="Usar Papelera del sistema (gio trash) al eliminar binarios",
-            variable=self.var_trash,
-            bootstyle="round-toggle",
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=3)
+        self._trash_check = QCheckBox("Usar Papelera del sistema (gio trash) al eliminar binarios")
+        self._trash_check.setChecked(cfg.move_to_trash_on_delete)
+        form.addRow("", self._trash_check)
+
+        v.addLayout(form)
 
         # System Integration Box (Self-install)
-        sys_box = ttk.Labelframe(parent, text=" Integración de DeskForge con el sistema ", padding=12)
-        sys_box.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(16, 4))
+        sys_box = QGroupBox("Integración de DeskForge con el sistema")
+        sv = QVBoxLayout(sys_box)
+        sv.setSpacing(10)
 
-        ttk.Label(
-            sys_box,
-            text=(
-                "Instalá el lanzador propio de DeskForge en tu menú de aplicaciones y registrá asociaciones MIME "
-                "para integrar archivos .AppImage y .jar en 1 clic desde 'Abrir con DeskForge'."
-            ),
-            wraplength=640,
-            justify="left",
-            bootstyle="secondary",
-        ).pack(anchor="w", pady=(0, 10))
+        desc = QLabel(
+            "Instalá el lanzador propio de DeskForge en tu menú de aplicaciones y registrá asociaciones MIME "
+            "para integrar archivos .AppImage y .jar en 1 clic desde 'Abrir con DeskForge'."
+        )
+        desc.setWordWrap(True)
+        desc.setProperty("muted", True)
+        sv.addWidget(desc)
 
-        row = ttk.Frame(sys_box)
-        row.pack(fill="x")
-        self._self_status = ttk.Label(row, text="", font=("Sans", 9, "bold"))
-        self._self_status.pack(side="left")
-        self._self_btn = ttk.Button(row, text="", command=self._toggle_self_install)
-        self._self_btn.pack(side="right")
+        action_row = QHBoxLayout()
+        self._self_status = QLabel("")
+        action_row.addWidget(self._self_status, stretch=1)
+        self._self_btn = QPushButton("")
+        self._self_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._self_btn.clicked.connect(self._toggle_self_install)
+        action_row.addWidget(self._self_btn)
+        sv.addLayout(action_row)
+        v.addWidget(sys_box)
+        v.addStretch(1)
+
         self._refresh_self_status()
+        return tab
 
-    def _build_doctor_tab(self, parent: ttk.Frame) -> None:
-        tools_box = ttk.Labelframe(parent, text=" Herramientas de Linux detectadas ", padding=8)
-        tools_box.pack(fill="x", pady=(0, 10))
+    def _build_doctor_tab(self) -> QWidget:
+        tab = QWidget()
+        v = QVBoxLayout(tab)
+        v.setContentsMargins(14, 14, 14, 14)
+        v.setSpacing(10)
 
+        tools_box = QGroupBox("Herramientas de Linux detectadas")
+        grid = QGridLayout(tools_box)
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(4)
         tools = self._services.doctor_service.get_system_tools()
         for idx, (tool, path) in enumerate(tools.items()):
             mark = "✓" if path else "·"
-            style = "success" if path else "secondary"
-            ttk.Label(tools_box, text=f"{mark} {tool}", bootstyle=style, font=("Sans", 9)).grid(
-                row=idx // 3, column=idx % 3, sticky="w", padx=10, pady=2
-            )
+            lbl = QLabel(f"{mark}  {tool}")
+            lbl.setToolTip(path or "No instalada (opcional)")
+            if path:
+                lbl.setStyleSheet("color: #22c55e; font-weight: 600;")
+            else:
+                lbl.setProperty("muted", True)
+            grid.addWidget(lbl, idx // 3, idx % 3)
+        v.addWidget(tools_box)
 
-        ttk.Label(parent, text="Salud de aplicaciones gestionadas:", font=("Sans", 10, "bold")).pack(anchor="w")
-        self._issues_tree = ttk.Treeview(
-            parent,
-            columns=("severity", "app", "msg", "fix"),
-            show="headings",
-            height=9,
-        )
-        self._issues_tree.heading("severity", text="Nivel")
-        self._issues_tree.heading("app", text="Aplicación")
-        self._issues_tree.heading("msg", text="Detalle")
-        self._issues_tree.heading("fix", text="Reparable")
-        self._issues_tree.column("severity", width=75)
-        self._issues_tree.column("app", width=150)
-        self._issues_tree.column("msg", width=360)
-        self._issues_tree.column("fix", width=80)
-        self._issues_tree.pack(fill="both", expand=True, pady=(6, 8))
+        hdr = QLabel("Salud de aplicaciones gestionadas:")
+        hdr.setStyleSheet("font-weight: 700;")
+        v.addWidget(hdr)
 
-        btn_row = ttk.Frame(parent)
-        btn_row.pack(fill="x")
-        self._doctor_summary = ttk.Label(btn_row, text="", bootstyle="secondary")
-        self._doctor_summary.pack(side="left")
-        ttk.Button(btn_row, text="🔧 Reparar automáticamente", bootstyle="warning", command=self._run_repair).pack(
-            side="right", padx=(6, 0)
-        )
-        ttk.Button(btn_row, text="↻ Re-analizar", bootstyle="info-outline", command=self._refresh_doctor).pack(
-            side="right"
-        )
+        self._issues_table = QTableWidget(0, 4)
+        self._issues_table.setHorizontalHeaderLabels(["Nivel", "Aplicación", "Detalle", "Reparable"])
+        self._issues_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self._issues_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        self._issues_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self._issues_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self._issues_table.setColumnWidth(1, 160)
+        self._issues_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._issues_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._issues_table.setAlternatingRowColors(True)
+        v.addWidget(self._issues_table, stretch=1)
+
+        btn_row = QHBoxLayout()
+        self._doctor_summary = QLabel("")
+        btn_row.addWidget(self._doctor_summary, stretch=1)
+
+        recheck_btn = QPushButton("↻ Re-analizar")
+        recheck_btn.clicked.connect(self._refresh_doctor)
+        btn_row.addWidget(recheck_btn)
+
+        repair_btn = QPushButton("🔧 Reparar automáticamente")
+        repair_btn.setProperty("variant", "warning")
+        repair_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        repair_btn.clicked.connect(self._run_repair)
+        btn_row.addWidget(repair_btn)
+        v.addLayout(btn_row)
+
         self._refresh_doctor()
+        return tab
 
     def _pick_managed_dir(self) -> None:
-        d = filedialog.askdirectory(parent=self, initialdir=self.var_managed_dir.get())
+        d = QFileDialog.getExistingDirectory(self, "Carpeta de apps gestionadas", self._managed_edit.text())
         if d:
-            self.var_managed_dir.set(d)
+            self._managed_edit.setText(d)
 
     def _pick_scan_dir(self) -> None:
-        d = filedialog.askdirectory(parent=self, initialdir=self.var_scan_dir.get())
+        d = QFileDialog.getExistingDirectory(self, "Carpeta de escaneo", self._scan_edit.text())
         if d:
-            self.var_scan_dir.set(d)
+            self._scan_edit.setText(d)
+
+    def _on_theme_selected(self) -> None:
+        code = self._theme_combo.currentData()
+        if code:
+            self._on_theme_change(str(code))
 
     def _refresh_self_status(self) -> None:
         installed = self._services.system.is_self_installed()
         if installed:
-            self._self_status.configure(text="✓ Instalado en el menú del sistema y 'Abrir con...'", bootstyle="success")
-            self._self_btn.configure(text="Desinstalar lanzador", bootstyle="danger-outline")
+            self._self_status.setText("✓ Instalado en el menú del sistema y 'Abrir con...'")
+            self._self_status.setStyleSheet("color: #22c55e; font-weight: 600;")
+            self._self_btn.setText("Desinstalar lanzador")
+            self._self_btn.setProperty("variant", "danger")
         else:
-            self._self_status.configure(text="No instalado todavía en el menú del sistema", bootstyle="secondary")
-            self._self_btn.configure(text="Instalar en menú del sistema", bootstyle="success")
+            self._self_status.setText("No instalado todavía en el menú del sistema")
+            self._self_status.setStyleSheet("")
+            self._self_status.setProperty("muted", True)
+            self._self_btn.setText("Instalar en menú del sistema")
+            self._self_btn.setProperty("variant", "success")
+        self._self_btn.style().unpolish(self._self_btn)
+        self._self_btn.style().polish(self._self_btn)
 
     def _toggle_self_install(self) -> None:
         if self._services.system.is_self_installed():
@@ -221,35 +263,41 @@ class SettingsAndDoctorDialog(ttk.Toplevel):
         self._refresh_self_status()
 
     def _refresh_doctor(self) -> None:
-        for item in self._issues_tree.get_children():
-            self._issues_tree.delete(item)
+        self._issues_table.setRowCount(0)
         issues = self._services.doctor_service.run_checks()
         for issue in issues:
+            row = self._issues_table.rowCount()
+            self._issues_table.insertRow(row)
             sev = "ERROR" if issue.severity == IssueSeverity.ERROR else "AVISO"
-            self._issues_tree.insert(
-                "",
-                "end",
-                values=(sev, issue.app_name or "-", issue.message, "Sí" if issue.fixable else "No"),
-            )
+            self._issues_table.setItem(row, 0, QTableWidgetItem(sev))
+            self._issues_table.setItem(row, 1, QTableWidgetItem(issue.app_name or "-"))
+            self._issues_table.setItem(row, 2, QTableWidgetItem(issue.message))
+            self._issues_table.setItem(row, 3, QTableWidgetItem("Sí" if issue.fixable else "No"))
+
         if not issues:
-            self._doctor_summary.configure(text="✓ Todas las aplicaciones están saludables.", bootstyle="success")
+            self._doctor_summary.setText("✓ Todas las aplicaciones están saludables.")
+            self._doctor_summary.setStyleSheet("color: #22c55e; font-weight: 600;")
         else:
-            self._doctor_summary.configure(text=f"Se encontraron {len(issues)} incidencia(s).", bootstyle="warning")
+            self._doctor_summary.setText(f"⚠ Se encontraron {len(issues)} incidencia(s).")
+            self._doctor_summary.setStyleSheet("color: #f59e0b; font-weight: 600;")
 
     def _run_repair(self) -> None:
         repaired = self._services.doctor_service.repair_all()
         self._refresh_doctor()
         self._on_repaired(repaired)
-        self._on_toast(f"Diagnóstico completado: {repaired} problema(s) reparado(s).", "success" if repaired else "info")
+        self._on_toast(
+            f"Diagnóstico completado: {repaired} problema(s) reparado(s).",
+            "success" if repaired else "info",
+        )
 
     def _save_prefs(self) -> None:
         cfg = self._services.app_service.get_config()
-        cfg.managed_apps_dir = self.var_managed_dir.get().strip()
-        cfg.scan_directory = self.var_scan_dir.get().strip()
-        cfg.default_storage_mode = self.var_storage_mode.get()
-        cfg.default_desktop_shortcut = self.var_shortcut.get()
-        cfg.move_to_trash_on_delete = self.var_trash.get()
-        cfg.theme = self.var_theme.get()
+        cfg.managed_apps_dir = self._managed_edit.text().strip()
+        cfg.scan_directory = self._scan_edit.text().strip()
+        cfg.default_storage_mode = str(self._storage_combo.currentData() or StorageMode.MOVE.value)
+        cfg.default_desktop_shortcut = self._shortcut_check.isChecked()
+        cfg.move_to_trash_on_delete = self._trash_check.isChecked()
+        cfg.theme = str(self._theme_combo.currentData() or self._current_theme)
         self._services.app_service.save_config(cfg)
         self._on_toast("Preferencias guardadas.", "success")
-        self.destroy()
+        self.accept()
