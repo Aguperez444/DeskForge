@@ -19,10 +19,11 @@ Permite integrar, organizar, configurar, actualizar y desinstalar **AppImages**,
   - **Actualización de versión in-place**: reemplazá el `.AppImage`/`.jar` conservando tus variables de entorno, configuración JVM, GPU y categorías.
   - **Escáner de Descargas** + **Importador de `.desktop` existentes** (incluyendo lanzadores creados con la versión original de AutoJar).
   - **Diagnóstico y auto-reparación (`Doctor`)** para detectar binarios rotos, permisos faltantes o `.desktop` inválidos.
-- **Integración nativa con el escritorio Linux (KDE / GNOME / XDG)**:
+- **Integración nativa con el escritorio Linux (KDE / GNOME / Wayland / XDG)**:
+  - Interfaz nativa en **PySide6 (Qt 6)** con soporte real para **Wayland**, HiDPI, renderizado nativo de SVG e íconos del tema del sistema (`QIcon.fromTheme`).
   - Cumplimiento FreeDesktop v1.5 con validación integrada (`desktop-file-validate`), escapado seguro de `Exec=`, `xdg-user-dir`, `gio metadata::trusted`, `update-desktop-database` y `kbuildsycoca6`.
-  - Temas claro y oscuro (`ttkbootstrap`) con detección automática del tema del sistema.
-  - Flujo multimodal: `Ctrl+V` global para pegar archivos/URLs, soporte automático de `tkdnd` si está disponible, **"Abrir con DeskForge"** (`install-self`) y **CLI completo**.
+  - Temas claro y oscuro (QSS) con detección automática del tema del sistema.
+  - **Drag & Drop nativo de Qt 6** sobre la ventana principal, `Ctrl+V` global para pegar archivos/URLs, **"Abrir con DeskForge"** (`install-self`) y **CLI completo**.
 
 ---
 
@@ -36,7 +37,7 @@ src/deskforge/
 ├── infrastructure/  # Repositorios JSON atómicos, XDG, motor .desktop v1.5, OS e inspectors/ (Strategy)
 ├── application/     # Casos de uso (AppService, DoctorService) y composición (ServiceContainer)
 ├── cli/             # Adaptador CLI (argparse, soporte --json)
-├── ui/              # Adaptador GUI modular en ttkbootstrap
+├── ui/              # Adaptador GUI modular en PySide6 (Qt 6)
 └── assets/          # Íconos de DeskForge y legado AutoJar
 ```
 
@@ -46,8 +47,7 @@ src/deskforge/
 
 ### Requisitos
 - Python 3.11+
-- `ttkbootstrap` y `Pillow` (`pip install ttkbootstrap pillow`)
-- Opcional para Drag & Drop nativo en Tk 8.6: `tkinterdnd2`
+- `PySide6` y `Pillow` (`pip install PySide6 pillow`)
 
 ### Ejecución directa
 ```bash
